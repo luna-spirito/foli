@@ -1,6 +1,6 @@
 mod movement;
 
-use crate::movement::{BipedalCfg, apply_ik, locomotion, setup_bipedal};
+use crate::movement::{BipedalCfg, locomotion, setup_bipedal};
 use bevy::prelude::*;
 
 fn main() {
@@ -13,7 +13,6 @@ fn main() {
                 setup_bipedal,
                 // Chain the input service with the locomotion brain
                 wasd_input.pipe(locomotion),
-                apply_ik,
             ),
         )
         .run();
@@ -55,7 +54,11 @@ fn setup(
     commands.spawn((
         SceneRoot(asset_server.load("models/mihuman.glb#Scene0")),
         Transform::from_xyz(0.0, 0.0, 0.0),
-        BipedalCfg { speed: 1.5 },
+        BipedalCfg {
+            speed: 1.5,
+            step_duration: 0.25,
+            step_height: 0.2,
+        },
         Player, // Mark as player controlled
     ));
 }

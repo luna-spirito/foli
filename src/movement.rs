@@ -2,9 +2,13 @@ use std::f32::consts::PI;
 
 use bevy::prelude::*;
 
+const STEP_THRESHOLD: f32 = 0.01;
+
 #[derive(Component)]
 pub struct BipedalCfg {
     pub speed: f32,
+    pub step_duration: f32,
+    pub step_height: f32,
 }
 
 #[derive(Component)]
@@ -29,8 +33,7 @@ struct StepState {
     leg_index: usize,
     start_pos: Vec3,
     target_pos: Vec3,
-    start_time: f32,
-    duration: f32,
+    progress: f32,
 }
 
 pub fn setup_bipedal(
@@ -128,15 +131,23 @@ pub fn setup_bipedal(
 pub fn locomotion(
     In(target_opt): In<Option<Vec3>>,
     time: Res<Time>,
-    mut query: Query<(&mut Transform, &BipedalCfg, &mut Bipedal)>,
+    mut query: Query<(
+        Entity,
+        &mut Transform,
+        &BipedalCfg,
+        &mut Bipedal,
+        &GlobalTransform,
+    )>,
+    mut transforms: Query<&mut Transform, Without<Bipedal>>,
+    global_transforms: Query<&GlobalTransform>,
+    parents: Query<&ChildOf>,
     mut gizmos: Gizmos,
 ) {
-    for (mut transform, bipedal_cfg, mut bipedal) in &mut query {
+    for (entity, mut transform, bipedal_cfg, mut bipedal, global_transform) in &mut query {
         let dt = time.delta_secs();
-        let mut move_dir = None;
 
         // 1. Move Body
-        if let Some(target) = target_opt {
+        let move_dir = if let Some(target) = target_opt {
             let to_target = target - transform.translation;
             let dist = to_target.length();
 
@@ -150,36 +161,35 @@ pub fn locomotion(
                     transform.rotation = transform.rotation.slerp(target_rot, 10.0 * dt);
 
                     // Move forward (along new facing)
-                    // Or move directly towards target?
-                    // "Moves towards it" - let's move along the calculated direction
                     let velocity = dir_flat * bipedal_cfg.speed * dt;
                     transform.translation += velocity;
-
-                    move_dir = Some(dir_flat);
                 }
+                dir_flat
+            } else {
+                Vec3::ZERO
             }
-        }
+        } else {
+            Vec3::ZERO
+        };
 
         let body_pos = transform.translation;
         let body_right = transform.right();
         let body_right_vec = Vec3::new(body_right.x, 0.0, body_right.z).normalize();
 
         // 2. Handle Stepping Logic
-
-        // If stepping, update the animation
         if let Bipedal {
             step: Some(step),
             legs,
         } = &mut *bipedal
         {
-            let elapsed = time.elapsed_secs() - step.start_time;
-            let t = (elapsed / step.duration).clamp(0.0, 1.0);
+            step.progress += dt / bipedal_cfg.step_duration;
+            let t = step.progress.clamp(0.0, 1.0);
 
             // Smoothstep for smoother motion
             let smooth_t = t * t * (3.0 - 2.0 * t);
 
             let ground_curr = step.start_pos.lerp(step.target_pos, smooth_t);
-            let height = (t * PI).sin() * 0.2; // 20cm step height
+            let height = (t * PI).sin() * bipedal_cfg.step_height;
 
             legs[step.leg_index].current_pos = ground_curr + Vec3::Y * height;
 
@@ -188,25 +198,18 @@ pub fn locomotion(
                 legs[step.leg_index].current_pos.y = 0.0;
                 bipedal.step = None;
             }
-        } else if let Some(move_dir) = move_dir {
-            // No step active, check if we need to start one
-            // Ideally, we want to step with the leg that is furthest behind or most uncomfortable
-
+        } else {
             let mut best_candidate = None;
             let mut max_dist = 0.0;
 
-            // Step threshold: when foot is this far from "ideal" position, trigger step
-            let step_threshold = 0.45;
-
             for (i, leg) in bipedal.legs.iter().enumerate() {
                 // Calculate ideal position for this leg
-                // Ideal is: BodyPos + SideOffset + slight forward lead
                 let ideal_pos = body_pos + (body_right_vec * leg.side_offset) + (move_dir * 0.3);
                 let ideal_ground = Vec3::new(ideal_pos.x, 0.0, ideal_pos.z);
 
                 let dist = leg.current_pos.distance(ideal_ground);
 
-                if dist > step_threshold && dist > max_dist {
+                if dist > STEP_THRESHOLD && dist > max_dist {
                     max_dist = dist;
                     best_candidate = Some(i);
                 }
@@ -215,11 +218,10 @@ pub fn locomotion(
             if let Some(idx) = best_candidate {
                 // Start step
                 // Predict where the body will be when step finishes
-                let step_duration = 0.35;
-                let predicted_body_pos = body_pos + (move_dir * bipedal_cfg.speed * step_duration);
+                let predicted_body_pos =
+                    body_pos + (move_dir * bipedal_cfg.speed * bipedal_cfg.step_duration);
 
                 // Target is relative to predicted body pos
-                // Add some "overstep" to place foot ahead of body
                 let target_pos = predicted_body_pos
                     + (body_right_vec * bipedal.legs[idx].side_offset)
                     + (move_dir * 0.25);
@@ -228,13 +230,19 @@ pub fn locomotion(
                     leg_index: idx,
                     start_pos: bipedal.legs[idx].current_pos,
                     target_pos: Vec3::new(target_pos.x, 0.0, target_pos.z),
-                    start_time: time.elapsed_secs(),
-                    duration: step_duration,
+                    progress: 0.0,
                 });
             }
         }
-        // If not moving and no step active, we just stand.
-        // Optional: Add logic to bring feet back to neutral if stopped for a while.
+
+        // 3. Apply IK
+        apply_ik_internal(
+            &bipedal,
+            global_transform,
+            &mut transforms,
+            &global_transforms,
+            &parents,
+        );
 
         // Debug Gizmos
         for leg in &bipedal.legs {
@@ -243,46 +251,44 @@ pub fn locomotion(
     }
 }
 
-pub fn apply_ik(
-    mut bipedal_query: Query<(&Bipedal, &Transform, &GlobalTransform)>,
-    mut transforms: Query<&mut Transform, Without<Bipedal>>,
-    global_transforms: Query<&GlobalTransform>,
-    parents: Query<&ChildOf>,
+fn apply_ik_internal(
+    bipedal: &Bipedal,
+    root_global: &GlobalTransform,
+    transforms: &mut Query<&mut Transform, Without<Bipedal>>,
+    global_transforms: &Query<&GlobalTransform>,
+    parents: &Query<&ChildOf>,
 ) {
-    for (bipedal, _root_local, root_global) in &mut bipedal_query {
-        let pole = root_global.forward(); // Knees point forward
+    let pole = root_global.forward(); // Knees point forward
 
-        for leg in &bipedal.legs {
-            // Get current hip global pos
-            let hip_global = match global_transforms.get(leg.hip) {
-                Ok(t) => t.translation(),
-                Err(_) => continue,
-            };
+    for leg in &bipedal.legs {
+        // Get current hip global pos
+        let hip_global = match global_transforms.get(leg.hip) {
+            Ok(t) => t.translation(),
+            Err(_) => continue,
+        };
 
-            // Solve IK (Pure Math)
-            let (hip_rot_global, knee_rot_local) = solve_two_bone_ik(
-                hip_global,
-                leg.current_pos,
-                pole.into(),
-                leg.lengths.0,
-                leg.lengths.1,
-            );
+        // Solve IK (Pure Math)
+        let (hip_rot_global, knee_rot_local) = solve_two_bone_ik(
+            hip_global,
+            leg.current_pos,
+            pole.into(),
+            leg.lengths.0,
+            leg.lengths.1,
+        );
 
-            // Apply Knee (Local)
-            if let Ok(mut knee_tf) = transforms.get_mut(leg.knee) {
-                knee_tf.rotation = knee_rot_local;
-            }
+        // Apply Knee (Local)
+        if let Ok(mut knee_tf) = transforms.get_mut(leg.knee) {
+            knee_tf.rotation = knee_rot_local;
+        }
 
-            // Apply Hip (Global -> Local)
-            // Need to convert global rotation to local space of the hip's parent
-            if let Ok(parent) = parents.get(leg.hip) {
-                if let Ok(parent_global) = global_transforms.get(parent.parent()) {
-                    let (_, parent_rot, _) = parent_global.to_scale_rotation_translation();
-                    let hip_local_rot = parent_rot.inverse() * hip_rot_global;
+        // Apply Hip (Global -> Local)
+        if let Ok(parent) = parents.get(leg.hip) {
+            if let Ok(parent_global) = global_transforms.get(parent.parent()) {
+                let (_, parent_rot, _) = parent_global.to_scale_rotation_translation();
+                let hip_local_rot = parent_rot.inverse() * hip_rot_global;
 
-                    if let Ok(mut hip_tf) = transforms.get_mut(leg.hip) {
-                        hip_tf.rotation = hip_local_rot;
-                    }
+                if let Ok(mut hip_tf) = transforms.get_mut(leg.hip) {
+                    hip_tf.rotation = hip_local_rot;
                 }
             }
         }
