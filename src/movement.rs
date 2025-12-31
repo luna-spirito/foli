@@ -195,6 +195,39 @@ pub fn locomotion(
             step.progress += dt / bipedal_cfg.step_duration;
             let t = step.progress.clamp(0.0, 1.0);
 
+            // Dynamic Step Retargeting:
+            // If the input changes (move_dir changes), we want to land the foot 
+            // at a new, more appropriate location (e.g. stop earlier).
+            // We avoid updating near the end (t > 0.9) to prevent numerical instability.
+            if t < 0.9 {
+                let remaining_time = bipedal_cfg.step_duration * (1.0 - t);
+                // Predict where body will be at the end of the step with *current* velocity
+                let predicted_body_end_pos = body_pos + (move_dir * bipedal_cfg.speed * remaining_time);
+
+                let idx = step.leg_index;
+                let leg_side_offset = legs[idx].side_offset;
+
+                let new_target = predicted_body_end_pos 
+                    + (body_right_vec * leg_side_offset)
+                    + (move_dir * 0.25);
+                let new_target_ground = Vec3::new(new_target.x, 0.0, new_target.z);
+
+                // We need to switch the bezier curve from (OldStart -> OldTarget) to (NewStart -> NewTarget)
+                // such that at current 't', the position is identical (no pop).
+                // Pos(t) = Start * (1 - smooth_t) + Target * smooth_t
+                // CurrentPos = NewStart * (1 - smooth_t) + NewTarget * smooth_t
+                // NewStart = (CurrentPos - NewTarget * smooth_t) / (1 - smooth_t)
+
+                let smooth_t = t * t * (3.0 - 2.0 * t);
+                let current_ground = step.start_pos.lerp(step.target_pos, smooth_t);
+
+                let denom = 1.0 - smooth_t;
+                if denom > 1e-4 {
+                    step.start_pos = (current_ground - new_target_ground * smooth_t) / denom;
+                    step.target_pos = new_target_ground;
+                }
+            }
+
             // Smoothstep for smoother motion
             let smooth_t = t * t * (3.0 - 2.0 * t);
 
