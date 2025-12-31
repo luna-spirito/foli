@@ -3,6 +3,7 @@ use std::f32::consts::PI;
 use bevy::prelude::*;
 
 const STEP_THRESHOLD: f32 = 0.01;
+const ROTATION_SPEED: f32 = 10.0;
 
 #[derive(Component)]
 pub struct BipedalCfg {
@@ -158,7 +159,16 @@ pub fn locomotion(
                 if dir_flat != Vec3::ZERO {
                     // Rotate towards target
                     let target_rot = Transform::default().looking_at(target, Vec3::Y).rotation;
-                    transform.rotation = transform.rotation.slerp(target_rot, 10.0 * dt);
+                    let angle = transform.rotation.angle_between(target_rot);
+
+                    // Ensure constant rotation speed (angular velocity)
+                    // standard slerp(rot, target, t) with fixed t is non-linear (slows down at end).
+                    // By calculating t = (speed * dt) / angle, we move a fixed arc length each frame.
+                    if angle > 0.0 {
+                        let max_angle = ROTATION_SPEED * dt;
+                        let t = (max_angle / angle).min(1.0);
+                        transform.rotation = transform.rotation.slerp(target_rot, t);
+                    }
 
                     // Move forward (along new facing)
                     let velocity = dir_flat * bipedal_cfg.speed * dt;
