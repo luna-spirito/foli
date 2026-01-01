@@ -1,11 +1,14 @@
 mod movement;
 
 use crate::movement::{BipedalCfg, locomotion, setup_bipedal};
-use bevy::prelude::*;
+use bevy::{gltf::GltfPlugin, prelude::*};
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins(DefaultPlugins.set(GltfPlugin {
+            use_model_forward_direction: true,
+            ..default()
+        }))
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -52,12 +55,15 @@ fn setup(
 
     // Model
     commands.spawn((
-        SceneRoot(asset_server.load("models/mihuman.glb#Scene0")),
+        SceneRoot(asset_server.load("models/bastard.glb#Scene0")),
         Transform::from_xyz(0.0, 0.0, 0.0),
         BipedalCfg {
             speed: 1.5,
             step_duration: 0.25,
             step_height: 0.2,
+            ankle_height: 0.3, //0.05,
+            torso_off_min: -0.1,
+            torso_off_sway: 0.05,
         },
         Player, // Mark as player controlled
     ));

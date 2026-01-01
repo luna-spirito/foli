@@ -10,6 +10,9 @@ pub struct BipedalCfg {
     pub speed: f32,
     pub step_duration: f32,
     pub step_height: f32,
+    pub ankle_height: f32,
+    pub torso_off_min: f32,
+    pub torso_off_sway: f32,
 }
 
 #[derive(Component)]
@@ -54,10 +57,10 @@ pub fn setup_bipedal(
                 match name.as_str() {
                     "mixamorig:LeftUpLeg" => left_bones.0 = Some(curr),
                     "mixamorig:LeftLeg" => left_bones.1 = Some(curr),
-                    "mixamorig:LeftFoot" => left_bones.2 = Some(curr),
+                    "mixamorig:LeftFoot_Target" => left_bones.2 = Some(curr),
                     "mixamorig:RightUpLeg" => right_bones.0 = Some(curr),
                     "mixamorig:RightLeg" => right_bones.1 = Some(curr),
-                    "mixamorig:RightFoot" => right_bones.2 = Some(curr),
+                    "mixamorig:RightFoot_Target" => right_bones.2 = Some(curr),
                     _ => {}
                 }
             }
@@ -158,7 +161,7 @@ pub fn locomotion(
 
                 if dir_flat != Vec3::ZERO {
                     // Rotate towards target
-                    let target_rot = Transform::default().looking_at(target, Vec3::Y).rotation;
+                    let target_rot = Transform::default().looking_at(dir_flat, Vec3::Y).rotation;
                     let angle = transform.rotation.angle_between(target_rot);
 
                     // Ensure constant rotation speed (angular velocity)
@@ -181,6 +184,7 @@ pub fn locomotion(
         } else {
             Vec3::ZERO
         };
+        transform.translation.y = -0.2;
 
         let body_pos = transform.translation;
         let body_right = transform.right();
@@ -196,20 +200,20 @@ pub fn locomotion(
             let t = step.progress.clamp(0.0, 1.0);
 
             // Dynamic Step Retargeting:
-            // If the input changes (move_dir changes), we want to land the foot 
+            // If the input changes (move_dir changes), we want to land the foot
             // at a new, more appropriate location (e.g. stop earlier).
             // We avoid updating near the end (t > 0.9) to prevent numerical instability.
             if t < 0.9 {
                 let remaining_time = bipedal_cfg.step_duration * (1.0 - t);
                 // Predict where body will be at the end of the step with *current* velocity
-                let predicted_body_end_pos = body_pos + (move_dir * bipedal_cfg.speed * remaining_time);
+                let predicted_body_end_pos =
+                    body_pos + (move_dir * bipedal_cfg.speed * remaining_time);
 
                 let idx = step.leg_index;
                 let leg_side_offset = legs[idx].side_offset;
 
-                let new_target = predicted_body_end_pos 
-                    + (body_right_vec * leg_side_offset)
-                    + (move_dir * 0.25);
+                let new_target =
+                    predicted_body_end_pos + (body_right_vec * leg_side_offset) + (move_dir * 0.25);
                 let new_target_ground = Vec3::new(new_target.x, 0.0, new_target.z);
 
                 // We need to switch the bezier curve from (OldStart -> OldTarget) to (NewStart -> NewTarget)
@@ -285,6 +289,7 @@ pub fn locomotion(
             &mut transforms,
             &global_transforms,
             &parents,
+            bipedal_cfg.ankle_height,
         );
 
         // Debug Gizmos
@@ -297,56 +302,66 @@ pub fn locomotion(
 fn apply_ik_internal(
     bipedal: &Bipedal,
     root_global: &GlobalTransform,
-    transforms: &mut Query<&mut Transform, Without<Bipedal>>,
-    global_transforms: &Query<&GlobalTransform>,
-    parents: &Query<&ChildOf>,
+    transforms_query: &mut Query<&mut Transform, Without<Bipedal>>,
+    global_transforms_query: &Query<&GlobalTransform>,
+    childof_query: &Query<&ChildOf>,
+    ankle_height: f32,
 ) {
     let pole = root_global.forward(); // Knees point forward
 
     for leg in &bipedal.legs {
         // Get current hip global pos
-        let hip_global = match global_transforms.get(leg.hip) {
-            Ok(t) => t.translation(),
+        let (hip_translation, hip_scale) = match global_transforms_query.get(leg.hip) {
+            Ok(t) => (t.translation(), t.scale()),
             Err(_) => continue,
         };
 
         // Solve IK (Pure Math)
-        let (hip_rot_global, knee_rot_local) = solve_two_bone_ik(
-            hip_global,
-            leg.current_pos,
+        let (hip_rot_global, knee_rot_local, ankle_rot_local) = solve_two_bone_ik(
+            hip_translation,
+            leg.current_pos + Vec3::Y * ankle_height,
             pole.into(),
             leg.lengths.0,
             leg.lengths.1,
         );
 
+        // Apply Hip (Global -> Local)
+        if let Ok(childof) = childof_query.get(leg.hip) {
+            if let Ok(parent_global) = global_transforms_query.get(childof.parent()) {
+                let target_global_tf = GlobalTransform::from(Transform {
+                    translation: hip_translation,
+                    rotation: hip_rot_global,
+                    scale: hip_scale,
+                });
+
+                let new_local_tf = target_global_tf.reparented_to(parent_global);
+                if let Ok(mut hip_tf) = transforms_query.get_mut(leg.hip) {
+                    *hip_tf = new_local_tf;
+                }
+            }
+        }
+
         // Apply Knee (Local)
-        if let Ok(mut knee_tf) = transforms.get_mut(leg.knee) {
+        if let Ok(mut knee_tf) = transforms_query.get_mut(leg.knee) {
             knee_tf.rotation = knee_rot_local;
         }
 
-        // Apply Hip (Global -> Local)
-        if let Ok(parent) = parents.get(leg.hip) {
-            if let Ok(parent_global) = global_transforms.get(parent.parent()) {
-                let (_, parent_rot, _) = parent_global.to_scale_rotation_translation();
-                let hip_local_rot = parent_rot.inverse() * hip_rot_global;
-
-                if let Ok(mut hip_tf) = transforms.get_mut(leg.hip) {
-                    hip_tf.rotation = hip_local_rot;
-                }
-            }
+        // Apply Ankle (Local)
+        if let Ok(mut ankle_tf) = transforms_query.get_mut(leg.ankle) {
+            ankle_tf.rotation = ankle_rot_local;
         }
     }
 }
 
 /// Pure function: Solves 2-Bone IK
-/// Returns: (Hip Global Rotation, Knee Local Rotation)
+/// Returns: (Hip Global Rotation, Knee Local Rotation, Ankle Local Rotation)
 pub fn solve_two_bone_ik(
     hip_pos: Vec3,
     target_pos: Vec3,
     pole_vector: Vec3, // Direction knees should point (usually forward)
     l1: f32,           // Thigh length
     l2: f32,           // Shin length
-) -> (Quat, Quat) {
+) -> (Quat, Quat, Quat) {
     let to_target = target_pos - hip_pos;
     let dist = to_target.length();
 
@@ -415,5 +430,9 @@ pub fn solve_two_bone_ik(
     // Mat3 columns are (X, Y, Z)
     let hip_global_rot = Quat::from_mat3(&Mat3::from_cols(x_axis, y_axis, z_axis));
 
-    (hip_global_rot, knee_rot_local)
+    (
+        hip_global_rot,
+        knee_rot_local,
+        Quat::from_rotation_x((PI - angle_knee) - angle_hip_offset),
+    )
 }
