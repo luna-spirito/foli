@@ -24,8 +24,11 @@ pub struct Bipedal {
 #[derive(Clone)]
 struct Leg {
     hip: Entity,
+    hip_rot: Quat,
     knee: Entity,
+    knee_rot: Quat,
     ankle: Entity,
+    ankle_rot: Quat,
     lengths: (f32, f32),
     // The current world-space position of the foot (or where it's trying to be)
     current_pos: Vec3,
@@ -45,7 +48,7 @@ pub fn setup_bipedal(
     walker_query: Query<(Entity, &Transform), (With<BipedalCfg>, Without<Bipedal>)>,
     children_query: Query<&Children>,
     name_query: Query<&Name>,
-    global_transforms: Query<&GlobalTransform>,
+    bone_transforms: Query<(&GlobalTransform, &Transform), Without<BipedalCfg>>,
 ) {
     for (entity, transform) in &walker_query {
         let mut left_bones = (None, None, None);
@@ -57,10 +60,10 @@ pub fn setup_bipedal(
                 match name.as_str() {
                     "mixamorig:LeftUpLeg" => left_bones.0 = Some(curr),
                     "mixamorig:LeftLeg" => left_bones.1 = Some(curr),
-                    "mixamorig:LeftFoot_Target" => left_bones.2 = Some(curr),
+                    "mixamorig:LeftFoot" => left_bones.2 = Some(curr),
                     "mixamorig:RightUpLeg" => right_bones.0 = Some(curr),
                     "mixamorig:RightLeg" => right_bones.1 = Some(curr),
-                    "mixamorig:RightFoot_Target" => right_bones.2 = Some(curr),
+                    "mixamorig:RightFoot" => right_bones.2 = Some(curr),
                     _ => {}
                 }
             }
@@ -85,7 +88,11 @@ pub fn setup_bipedal(
             right_bones.2,
         ) {
             // Calculate lengths
-            let get_pos = |e| global_transforms.get(e).map(|t| t.translation());
+            let get_pos = |e| {
+                bone_transforms
+                    .get(e)
+                    .map(|t| (t.0.translation(), t.1.rotation))
+            };
 
             if let (Ok(lh), Ok(lk), Ok(la), Ok(rh), Ok(rk), Ok(ra)) = (
                 get_pos(l_hip),
@@ -95,8 +102,8 @@ pub fn setup_bipedal(
                 get_pos(r_knee),
                 get_pos(r_ankle),
             ) {
-                let l_len = (lh.distance(lk), lk.distance(la));
-                let r_len = (rh.distance(rk), rk.distance(ra));
+                let l_len = (lh.0.distance(lk.0), lk.0.distance(la.0));
+                let r_len = (rh.0.distance(rk.0), rk.0.distance(ra.0));
 
                 // Initialize feet directly under where they are (or idealized)
                 // For simplicity, let's start them at the ground relative to current transform
@@ -109,16 +116,22 @@ pub fn setup_bipedal(
                 let legs = [
                     Leg {
                         hip: l_hip,
+                        hip_rot: lh.1,
                         knee: l_knee,
+                        knee_rot: lk.1,
                         ankle: l_ankle,
+                        ankle_rot: la.1,
                         lengths: l_len,
                         current_pos: Vec3::new(l_start.x, 0.0, l_start.z),
                         side_offset: -0.15,
                     },
                     Leg {
                         hip: r_hip,
+                        hip_rot: rh.1,
                         knee: r_knee,
+                        knee_rot: rk.1,
                         ankle: r_ankle,
+                        ankle_rot: ra.1,
                         lengths: r_len,
                         current_pos: Vec3::new(r_start.x, 0.0, r_start.z),
                         side_offset: 0.15,
@@ -282,16 +295,6 @@ pub fn locomotion(
             }
         }
 
-        // 3. Apply IK
-        apply_ik_internal(
-            &bipedal,
-            global_transform,
-            &mut transforms,
-            &global_transforms,
-            &parents,
-            bipedal_cfg.ankle_height,
-        );
-
         // Debug Gizmos
         for leg in &bipedal.legs {
             gizmos.sphere(leg.current_pos, 0.05, Color::srgb(1.0, 1.0, 0.0));
@@ -299,140 +302,123 @@ pub fn locomotion(
     }
 }
 
-fn apply_ik_internal(
-    bipedal: &Bipedal,
-    root_global: &GlobalTransform,
-    transforms_query: &mut Query<&mut Transform, Without<Bipedal>>,
-    global_transforms_query: &Query<&GlobalTransform>,
-    childof_query: &Query<&ChildOf>,
-    ankle_height: f32,
+pub fn apply_ik(
+    bipedal_query: Query<(&Bipedal, &BipedalCfg, &GlobalTransform)>,
+    mut bone_query: Query<(&ChildOf, &mut Transform, &GlobalTransform)>,
 ) {
-    let pole = root_global.forward(); // Knees point forward
+    for (bipedal, bipedal_cfg, root_gtr) in bipedal_query {
+        for leg in &bipedal.legs {
+            let Ok([mut hip, mut knee, mut ankle]) =
+                bone_query.get_many_mut([leg.hip, leg.knee, leg.ankle])
+            else {
+                continue;
+            };
 
-    for leg in &bipedal.legs {
-        // Get current hip global pos
-        let (hip_translation, hip_scale) = match global_transforms_query.get(leg.hip) {
-            Ok(t) => (t.translation(), t.scale()),
-            Err(_) => continue,
-        };
+            let target = root_gtr.rotation().inverse().mul_vec3(
+                leg.current_pos + Vec3::Y * bipedal_cfg.ankle_height - hip.2.translation(),
+            );
+            let (hip_ik_rot, knee_ik_rot) = solve_ik(target, leg.lengths);
 
-        // Solve IK (Pure Math)
-        let (hip_rot_global, knee_rot_local, ankle_rot_local) = solve_two_bone_ik(
-            hip_translation,
-            leg.current_pos + Vec3::Y * ankle_height,
-            pole.into(),
-            leg.lengths.0,
-            leg.lengths.1,
-        );
+            hip.1.rotation = hip_ik_rot * leg.hip_rot;
+            knee.1.rotation = knee_ik_rot * leg.knee_rot;
 
-        // Apply Hip (Global -> Local)
-        if let Ok(childof) = childof_query.get(leg.hip) {
-            if let Ok(parent_global) = global_transforms_query.get(childof.parent()) {
-                let target_global_tf = GlobalTransform::from(Transform {
-                    translation: hip_translation,
-                    rotation: hip_rot_global,
-                    scale: hip_scale,
-                });
+            let h_new = hip_ik_rot * leg.hip_rot;
+            let k_new = knee_ik_rot * leg.knee_rot;
 
-                let new_local_tf = target_global_tf.reparented_to(parent_global);
-                if let Ok(mut hip_tf) = transforms_query.get_mut(leg.hip) {
-                    *hip_tf = new_local_tf;
-                }
-            }
-        }
-
-        // Apply Knee (Local)
-        if let Ok(mut knee_tf) = transforms_query.get_mut(leg.knee) {
-            knee_tf.rotation = knee_rot_local;
-        }
-
-        // Apply Ankle (Local)
-        if let Ok(mut ankle_tf) = transforms_query.get_mut(leg.ankle) {
-            ankle_tf.rotation = ankle_rot_local;
+            // TODO: REDO
+            // 3. The Ankle Math (The "Cancellation" logic)
+            // This represents the orientation of the foot relative to the pelvis in bind pose
+            let original_chain = leg.hip_rot * leg.knee_rot * leg.ankle_rot;
+            // This cancels the new IK movement and applies the original orientation
+            let ankle_new = (h_new * k_new).inverse() * original_chain;
+            ankle.1.rotation = ankle_new;
         }
     }
 }
 
-/// Pure function: Solves 2-Bone IK
-/// Returns: (Hip Global Rotation, Knee Local Rotation, Ankle Local Rotation)
-pub fn solve_two_bone_ik(
-    hip_pos: Vec3,
-    target_pos: Vec3,
-    pole_vector: Vec3, // Direction knees should point (usually forward)
-    l1: f32,           // Thigh length
-    l2: f32,           // Shin length
-) -> (Quat, Quat, Quat) {
-    let to_target = target_pos - hip_pos;
-    let dist = to_target.length();
+pub fn solve_ik(target: Vec3, (l1, l2): (f32, f32)) -> (Quat, Quat) {
+    let dist = target.length();
+    let dist_sq = dist * dist;
 
-    // 1. Knee Angle (Law of Cosines)
-    // Clamp distance so we don't break acos
-    let dist_clamped = dist.clamp(0.01, l1 + l2 - 0.001);
-
-    let cos_knee = (l1 * l1 + l2 * l2 - dist_clamped * dist_clamped) / (2.0 * l1 * l2);
-    let angle_knee = cos_knee.clamp(-1.0, 1.0).acos();
-
-    // Knee bend: Assuming standard rigging where -X rotation bends knee backwards?
-    // In many rigs (Mixamo), 0 rotation is straight leg.
-    // We want to rotate along the local X axis.
-    // The angle calculated is the internal angle.
-    // If leg is straight, angle is PI (180). We want 0 rotation.
-    // If leg is bent 90 deg, angle is PI/2. We want -90 deg rotation.
-    // So rotation is -(PI - angle).
-    let knee_rot_local = Quat::from_rotation_x(-(PI - angle_knee));
-
-    // 2. Hip Orientation
-    // We need to rotate the thigh so that:
-    // a) The ankle ends up at target_pos
-    // b) The knee points in direction of pole_vector
-
-    // First, calculate the angle offset for the thigh triangle
-    let cos_hip_offset =
-        (l1 * l1 + dist_clamped * dist_clamped - l2 * l2) / (2.0 * l1 * dist_clamped);
-    let angle_hip_offset = cos_hip_offset.clamp(-1.0, 1.0).acos();
-
-    // Base direction to target
-    let target_dir = to_target.normalize();
-
-    // Plane Normal: The plane formed by the leg triangle.
-    // Defined by the target vector and the pole vector.
-    // "Knee should point roughly towards pole"
-    let plane_normal = target_dir.cross(pole_vector).normalize_or_zero();
-
-    // If pole and target are collinear, pick a default (e.g. Up)
-    let plane_normal = if plane_normal.length_squared() < 0.001 {
-        target_dir.cross(Vec3::Y).normalize_or_zero()
-    } else {
-        plane_normal
-    };
-
-    // Rotate the target vector by the hip offset angle around the plane normal
-    // This gives us the direction the thigh bone should point in global space.
-    let thigh_dir = Quat::from_axis_angle(plane_normal, angle_hip_offset).mul_vec3(target_dir);
-
-    // Now construct a rotation looking down thigh_dir, with Up roughly towards plane_normal?
-    // Actually, usually:
-    // -Y axis (bone length) points to child.
-    // But in Mixamo/Blender, usually +Y or -Z points down the bone.
-    // Let's assume standard Bevy/GLTF: Bones often point along +Y or something.
-    // Wait, previous code used specific basis construction.
-    // Let's assume:
-    // Thigh Forward (-Z or Y?) -> thigh_dir
-    // Thigh Right (X) -> plane_normal
-
-    // Let's try constructing a LookAt.
-    // Assuming the bone's local Y axis points down the leg (common in Blender export).
-    // And X is the axis of rotation for the knee.
-    let y_axis = thigh_dir.normalize();
-    let x_axis = plane_normal.normalize();
-    let z_axis = x_axis.cross(y_axis).normalize();
-
-    // Mat3 columns are (X, Y, Z)
-    let hip_global_rot = Quat::from_mat3(&Mat3::from_cols(x_axis, y_axis, z_axis));
+    // 1. Law of Cosines for internal angles
+    let hip_angle = ((l1 * l1 + dist_sq - l2 * l2) / (2.0 * l1 * dist))
+        .clamp(-1.0, 1.0)
+        .acos();
+    let knee_angle = ((l1 * l1 + l2 * l2 - dist_sq) / (2.0 * l1 * l2))
+        .clamp(-1.0, 1.0)
+        .acos();
 
     (
-        hip_global_rot,
-        knee_rot_local,
-        Quat::from_rotation_x((PI - angle_knee) - angle_hip_offset),
+        Quat::from_rotation_x(hip_angle) * Quat::from_rotation_arc(Vec3::NEG_Y, target.normalize()),
+        Quat::from_rotation_x(PI - knee_angle),
     )
 }
+
+// pub fn solve_ik(target: Vec3, pole: Vec3, (l1, l2): (f32, f32)) -> (Quat, Quat) {
+//     let dist = target.length();
+
+//     let hip_angle = ((l1 * l1 + dist * dist - l2 * l2) / (2.0 * l1 * dist))
+//         .clamp(-1.0, 1.0)
+//         .acos();
+//     let knee_angle = ((l1 * l1 + l2 * l2 - dist * dist) / (2.0 * l1 * l2))
+//         .clamp(-1.0, 1.0)
+//         .acos();
+//     println!("{}", knee_angle * 180.0 / PI);
+
+//     let norm = target.cross(pole);
+//     (
+//         Quat::from_axis_angle(norm, hip_angle + Vec3::NEG_Y.angle_between(target)),
+//         Quat::from_rotation_x(PI - knee_angle),
+//     )
+// }
+
+// pub fn solve_ik(target: Vec3, pole: Vec3, (l1, l2): (f32, f32)) -> (Quat, Quat) {
+//     let dist = target.length();
+
+//     // Safety check to prevent NaN if target is at (0,0,0)
+//     if dist < 0.001 {
+//         return (Quat::IDENTITY, Quat::IDENTITY);
+//     }
+
+//     // 1. Law of Cosines (Magnitude)
+//     // Calculate the internal angles required to form the triangle
+//     let cos_hip = (l1 * l1 + dist * dist - l2 * l2) / (2.0 * l1 * dist);
+//     let hip_angle_tri = cos_hip.clamp(-1.0, 1.0).acos();
+
+//     let cos_knee = (l1 * l1 + l2 * l2 - dist * dist) / (2.0 * l1 * l2);
+//     let knee_angle_tri = cos_knee.clamp(-1.0, 1.0).acos();
+
+//     // 2. Aim the Leg (Global Orientation)
+//     // Create a rotation that points the leg's default direction (Down/-Y)
+//     // directly at the target vector.
+//     let target_dir = target.normalize();
+//     let aim_rot = Quat::from_rotation_arc(Vec3::NEG_Y, target_dir);
+
+//     // 3. Determine the Bend Plane
+//     // Calculate the axis perpendicular to the plane defined by Target and Pole.
+//     // If you want knees to bend forward, `pole` should be Vec3::Z (or whatever represents forward).
+//     // Note: If target and pole are parallel, this is unstable, so we fallback to X.
+//     let bend_axis = if target_dir.abs_diff_eq(pole.normalize(), 1e-4) {
+//         Vec3::X
+//     } else {
+//         pole.cross(target_dir).normalize()
+//     };
+
+//     // 4. Construct Rotations
+//     // Apply the hip angle to bend the thigh away from the direct target line
+//     // to accommodate the knee.
+//     // The order is important: We rotate around the bend_axis *relative* to the aim.
+//     let hip_bend_rot = Quat::from_axis_angle(bend_axis, hip_angle_tri);
+
+//     // Combine: First Aim, then Bend.
+//     // (In quaternion math `A * B` applies B then A, but since our axis is derived
+//     // from the target space, we treat this as a composition).
+//     let hip_rot = hip_bend_rot * aim_rot;
+
+//     // Knee Rotation:
+//     // Purely internal bend. We assume standard rig where X is the bend axis.
+//     // (PI - angle) because 180 degrees is a straight leg, 90 is bent.
+//     let knee_rot = Quat::from_rotation_x(PI - knee_angle_tri);
+
+//     (hip_rot, knee_rot)
+// }
