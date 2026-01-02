@@ -1,6 +1,6 @@
 mod movement;
 
-use crate::movement::{BipedalCfg, apply_ik, locomotion, setup_bipedal};
+use crate::movement::{BipedalCfg, apply_ik, debug_show_axis, locomotion, setup_bipedal};
 use bevy::{
     gltf::{GltfPlugin, convert_coordinates::GltfConvertCoordinates},
     prelude::*,
@@ -23,6 +23,7 @@ fn main() {
                 // Chain the input service with the locomotion brain
                 wasd_input.pipe(locomotion),
                 apply_ik,
+                debug_show_axis,
             ),
         )
         .run();
@@ -68,7 +69,7 @@ fn setup(
             speed: 1.5,
             step_duration: 0.25,
             step_height: 0.2,
-            ankle_height: 0.10, //0.05,
+            ankle_height: 0.07, //0.05,
             torso_off_min: -0.1,
             torso_off_sway: 0.05,
         },

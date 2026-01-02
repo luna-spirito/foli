@@ -6,6 +6,18 @@ const STEP_THRESHOLD: f32 = 0.01;
 const ROTATION_SPEED: f32 = 10.0;
 
 #[derive(Component)]
+pub struct DebugShowAxis;
+
+pub fn debug_show_axis(q: Query<&GlobalTransform, With<DebugShowAxis>>, mut gizmos: Gizmos) {
+    for gtr in q {
+        let pos = gtr.translation();
+        gizmos.arrow(pos, pos + gtr.back().as_vec3(), Color::srgb(0.0, 0.0, 1.0)); // Z
+        gizmos.arrow(pos, pos + gtr.up().as_vec3(), Color::srgb(0.0, 1.0, 0.0)); // Y
+        gizmos.arrow(pos, pos + gtr.right().as_vec3(), Color::srgb(1.0, 0.0, 0.0)); // Y
+    }
+}
+
+#[derive(Component)]
 pub struct BipedalCfg {
     pub speed: f32,
     pub step_duration: f32,
@@ -322,15 +334,12 @@ pub fn apply_ik(
             hip.1.rotation = hip_ik_rot * leg.hip_rot;
             knee.1.rotation = knee_ik_rot * leg.knee_rot;
 
-            let h_new = hip_ik_rot * leg.hip_rot;
-            let k_new = knee_ik_rot * leg.knee_rot;
-
             // TODO: REDO
             // 3. The Ankle Math (The "Cancellation" logic)
             // This represents the orientation of the foot relative to the pelvis in bind pose
             let original_chain = leg.hip_rot * leg.knee_rot * leg.ankle_rot;
             // This cancels the new IK movement and applies the original orientation
-            let ankle_new = (h_new * k_new).inverse() * original_chain;
+            let ankle_new = (hip.1.rotation * knee.1.rotation).inverse() * original_chain;
             ankle.1.rotation = ankle_new;
         }
     }
