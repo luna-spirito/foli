@@ -58,8 +58,7 @@ fn fragment(
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
     // Soft UV edges to hide card boundaries
-    let uv_mask = smoothstep(0.0, 0.1, in.uv.x) * (1.0 - smoothstep(0.9, 1.0, in.uv.x)) *
-                  smoothstep(0.0, 0.1, in.uv.y) * (1.0 - smoothstep(0.9, 1.0, in.uv.y));
+    let uv_mask = 1.0 - smoothstep(0.8, 1.0, length(in.uv - 0.5) * 2.0);
     pbr_input.material.base_color.a *= uv_mask;
 
     // Alpha discount
