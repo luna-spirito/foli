@@ -1,3 +1,4 @@
+mod foliage;
 mod movement;
 
 use crate::movement::{BipedalCfg, apply_ik, debug_show_axis, locomotion, setup_bipedal};
@@ -15,6 +16,7 @@ fn main() {
             },
             ..default()
         }))
+        .add_plugins(foliage::FoliagePlugin)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -38,7 +40,7 @@ fn setup(
     // Camera
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(3.0, 3.0, 5.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
+        Transform::from_xyz(6.0, 5.0, 8.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
     ));
 
     // Light
@@ -74,6 +76,11 @@ fn setup(
             torso_off_sway: 0.05,
         },
         Player, // Mark as player controlled
+    ));
+
+    commands.spawn((
+        SceneRoot(asset_server.load("models/tree-test.glb#Scene0")),
+        Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 }
 
