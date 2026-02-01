@@ -27,6 +27,10 @@ pub struct FoliageData {
     pub wind_flutter: f32,
     pub wind_gustiness: f32,
     pub time: f32,
+    pub serration: f32,
+    pub irregularity: f32,
+    // pub holes: f32,
+    pub edge_drying: f32,
 }
 
 impl MaterialExtension for FoliageExtension {
@@ -83,6 +87,10 @@ fn apply_foliage_materials(
                             wind_flutter: 0.2,
                             wind_gustiness: 0.5,
                             time: 0.0,
+                            serration: 0.5,
+                            irregularity: 1.0,
+                            // holes: 0.1,
+                            edge_drying: 0.8,
                         },
                     },
                 };

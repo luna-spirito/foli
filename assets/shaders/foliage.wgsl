@@ -24,6 +24,10 @@ struct FoliageData {
     wind_flutter: f32,
     wind_gustiness: f32,
     time: f32,
+    serration: f32,
+    irregularity: f32,
+    //holes: f32,
+    edge_drying: f32,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -193,22 +197,38 @@ fn get_leaf_mask(uv: vec2<f32>, instance_index: u32) -> f32 {
     let seed = f32(instance_index);
     let rand = hash11(seed);
 
-    // Base shape - slightly ovate (wider at bottom/stem area)
-    var shape = 0.8 + 0.15 * cos(angle - 1.57);
+    // 1. Blade-like base shape (sharper tip)
+    var shape = 0.7 + 0.25 * pow(abs(cos(angle * 0.5)), 0.5);
 
-    // Add character: chaotic edge (serration/irregularity)
-    let serration = sin(angle * (10.0 + rand * 5.0)) * 0.05;
-    let irregularity = sin(angle * 3.0 + rand * 6.28) * 0.1;
+    // 2. Sharp "Hostile" Serration (spiky peaks instead of smooth waves)
+    let serration_freq = 12.0 + rand * 8.0;
+    let serration_wave = abs(sin(angle * serration_freq)) * 0.15;
+    let serration = serration_wave * foliage_data.serration;
+
+    // 3. Chaotic Fractal Irregularity
+    let irr1 = sin(angle * 3.0 + rand * 6.28) * 0.15;
+    let irr2 = sin(angle * 15.0 - seed) * 0.05;
+    let irregularity = (irr1 + irr2) * foliage_data.irregularity;
 
     let final_radius = shape + serration + irregularity;
 
-    // Add random holes
-    let hole_noise = sin(uv.x * 20.0 + seed) * sin(uv.y * 22.0 - seed);
-    let hole_mask = step(0.98, hole_noise * hash11(seed * 1.1));
+    // 4. Shredded / Slash patterns
+    let slash_val = abs(sin(uv.x * 40.0 + uv.y * 30.0 + seed * 1.5));
+    let slash_mask = smoothstep(0.95, 0.99, slash_val) * step(0.6, hash11(seed * 2.2));
 
-    // Use smoothstep for a soft but clean edge
+    // 5. Random holes - reworked for visibility
+    // Multi-frequency noise for varied hole sizes
+    //let hole_n1 = sin(uv.x * 18.0 + seed * 0.7) * sin(uv.y * 22.0 - seed * 0.9);
+    //let hole_n2 = sin(uv.x * 35.0 - seed) * sin(uv.y * 40.0 + seed * 1.3);
+    //let hole_noise = (hole_n1 + hole_n2 * 0.5) * 0.5 + 0.5; // Normalize to [0, 1]
+    //// holes=0 -> threshold=1.0 (no holes), holes=1 -> threshold=0.5 (many holes)
+    //let hole_threshold = 1.0 - foliage_data.holes * 0.5;
+    //let hole_mask = step(hole_threshold, hole_noise);
+
+    // Combine into final mask
     var mask = 1.0 - smoothstep(final_radius - 0.02, final_radius + 0.02, dist);
-    mask *= (1.0 - hole_mask);
+    mask = saturate(mask - slash_mask * foliage_data.irregularity);
+    //mask *= (1.0 - hole_mask);
 
     return mask;
 }
@@ -245,10 +265,11 @@ fn fragment(
 
     pbr_input.material.base_color.a *= mask;
 
-    // Edge drying effect: darken and brown the edges
-    let edge_factor = smoothstep(0.0, 0.2, mask);
-    let dried_color = vec4<f32>(0.3, 0.2, 0.1, pbr_input.material.base_color.a);
-    pbr_input.material.base_color = mix(dried_color, pbr_input.material.base_color, edge_factor);
+    // Edge drying effect: hostile dark-purple/bruised tone
+    let edge_factor = smoothstep(0.0, 0.25, mask);
+    let hostile_edge = vec4<f32>(0.15, 0.05, 0.12, pbr_input.material.base_color.a);
+    let target_color = mix(hostile_edge, pbr_input.material.base_color, edge_factor);
+    pbr_input.material.base_color = mix(pbr_input.material.base_color, target_color, foliage_data.edge_drying);
 
     pbr_input.material.base_color = alpha_discard(
         pbr_input.material,
