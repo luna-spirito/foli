@@ -10,7 +10,7 @@
 #import bevy_pbr::mesh_view_bindings::globals
 
 #ifdef PREPASS_PIPELINE
-#import bevy_pbr::prepass_io::{Vertex, VertexOutput}
+#import bevy_pbr::prepass_io::{Vertex, VertexOutput, FragmentOutput}
 #import bevy_pbr::pbr_prepass_functions::prepass_alpha_discard
 #else
 #import bevy_pbr::forward_io::{Vertex, VertexOutput, FragmentOutput}
@@ -23,6 +23,7 @@ struct FoliageData {
     wind_amplitude: f32,
     wind_flutter: f32,
     wind_gustiness: f32,
+    time: f32,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
@@ -34,35 +35,36 @@ fn hash13(p: vec3<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-fn wind_displacement(world_pos: vec3<f32>, local_pos: vec3<f32>, time: f32) -> vec3<f32> {
+fn wind_displacement(world_pos: vec3<f32>, local_pos: vec3<f32>) -> vec3<f32> {
     let speed = foliage_data.wind_speed;
     let amp = foliage_data.wind_amplitude;
-    
+    let time = foliage_data.time;
+
     // 1. Large scale gustiness (global movement)
     let gust_noise = sin(time * speed * 0.2 + world_pos.x * 0.05 + world_pos.z * 0.03);
     let gust_strength = 1.0 + foliage_data.wind_gustiness * gust_noise;
-    
+
     // 2. Trunk/Main branch sway (low frequency)
     let main_phase = dot(world_pos.xz, vec2<f32>(0.2, 0.15));
     let main_sway = sin(time * speed + main_phase) * amp * gust_strength;
-    
+
     // 3. Cluster/Branch movement (medium frequency)
     // We use a combination of world and local pos to create "branch" groups
     let branch_seed = floor(world_pos * 2.0); // Create virtual clusters
     let branch_phase = hash13(branch_seed) * 6.28;
     let branch_sway = sin(time * speed * 1.7 + branch_phase) * amp * 0.4 * gust_strength;
-    
+
     // 4. Individual leaf flutter (high frequency)
     // Small scale noise based on local position
     let leaf_noise = sin(time * speed * 4.5 + dot(local_pos, vec3<f32>(10.0, 12.0, 11.0)));
     let leaf_flutter = leaf_noise * foliage_data.wind_flutter * amp * gust_strength;
-    
+
     // Combine directions
     let wind_dir = normalize(vec3<f32>(1.0, 0.1, 0.3));
     let side_dir = normalize(vec3<f32>(-0.3, 0.0, 1.0)); // Perpendicular-ish for some variety
-    
+
     let total_displacement = (main_sway + branch_sway) * wind_dir + (leaf_flutter * side_dir);
-    
+
     return total_displacement;
 }
 
@@ -84,16 +86,14 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         world_from_local,
         vec4<f32>(vertex.position, 1.0)
     );
-
-    // Wind displacement based on height
-    // Use a non-linear height factor for more natural bending
+    // Wind displacement based on height (works in all passes now)
     let local_y = vertex.position.y;
     let height_factor = pow(saturate(local_y), 1.5);
-    let displacement = wind_displacement(world_position.xyz, vertex.position, globals.time) * height_factor;
+    let displacement = wind_displacement(world_position.xyz, vertex.position) * height_factor;
 
     // Add a slight dip when swaying (simulating branch bending)
     let dip = length(displacement.xz) * 0.4 * height_factor;
-    
+
     world_position = vec4<f32>(
         world_position.x + displacement.x,
         world_position.y + displacement.y - dip,
@@ -177,26 +177,57 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     return out;
 }
 
+fn hash11(p: f32) -> f32 {
+    var p_val = fract(p * 0.1031);
+    p_val *= (p_val + 33.33);
+    p_val *= (p_val + p_val);
+    return fract(p_val);
+}
+
+fn get_leaf_mask(uv: vec2<f32>, instance_index: u32) -> f32 {
+    let center = vec2<f32>(0.5, 0.5);
+    let coords = (uv - center) * 2.0;
+    let dist = length(coords);
+    let angle = atan2(coords.y, coords.x);
+
+    let seed = f32(instance_index);
+    let rand = hash11(seed);
+
+    // Base shape - slightly ovate (wider at bottom/stem area)
+    var shape = 0.8 + 0.15 * cos(angle - 1.57);
+
+    // Add character: chaotic edge (serration/irregularity)
+    let serration = sin(angle * (10.0 + rand * 5.0)) * 0.05;
+    let irregularity = sin(angle * 3.0 + rand * 6.28) * 0.1;
+
+    let final_radius = shape + serration + irregularity;
+
+    // Add random holes
+    let hole_noise = sin(uv.x * 20.0 + seed) * sin(uv.y * 22.0 - seed);
+    let hole_mask = step(0.98, hole_noise * hash11(seed * 1.1));
+
+    // Use smoothstep for a soft but clean edge
+    var mask = 1.0 - smoothstep(final_radius - 0.02, final_radius + 0.02, dist);
+    mask *= (1.0 - hole_mask);
+
+    return mask;
+}
+
 #ifdef PREPASS_PIPELINE
 @fragment
-fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
+fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) {
+#ifdef VERTEX_UVS_A
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    let mask = get_leaf_mask(in.uv, in.instance_index);
+#else
+    let mask = get_leaf_mask(in.uv, 0u);
+#endif
+    if (mask < 0.5) {
+        discard;
+    }
+#endif
+
     prepass_alpha_discard(in);
-
-    var out: FragmentOutput;
-
-#ifdef DEPTH_CLAMP_ORTHO
-    out.frag_depth = in.clip_position_unclamped.z;
-#endif
-
-#ifdef NORMAL_PREPASS
-    out.normal = vec4(in.world_normal * 0.5 + vec3(0.5), 1.0);
-#endif
-
-#ifdef MOTION_VECTOR_PREPASS
-    out.motion_vector = vec2(0.0);
-#endif
-
-    return out;
 }
 #else
 @fragment
@@ -205,6 +236,19 @@ fn fragment(
     @builtin(front_facing) is_front: bool,
 ) -> FragmentOutput {
     var pbr_input = pbr_input_from_standard_material(in, is_front);
+
+#ifdef VERTEX_OUTPUT_INSTANCE_INDEX
+    let mask = get_leaf_mask(in.uv, in.instance_index);
+#else
+    let mask = get_leaf_mask(in.uv, 0u);
+#endif
+
+    pbr_input.material.base_color.a *= mask;
+
+    // Edge drying effect: darken and brown the edges
+    let edge_factor = smoothstep(0.0, 0.2, mask);
+    let dried_color = vec4<f32>(0.3, 0.2, 0.1, pbr_input.material.base_color.a);
+    pbr_input.material.base_color = mix(dried_color, pbr_input.material.base_color, edge_factor);
 
     pbr_input.material.base_color = alpha_discard(
         pbr_input.material,

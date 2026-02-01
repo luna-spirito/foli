@@ -10,7 +10,7 @@ pub struct FoliagePlugin;
 impl Plugin for FoliagePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<FoliageMaterial>::default())
-            .add_systems(Update, apply_foliage_materials);
+            .add_systems(Update, (apply_foliage_materials, update_foliage_time));
     }
 }
 
@@ -26,6 +26,7 @@ pub struct FoliageData {
     pub wind_amplitude: f32,
     pub wind_flutter: f32,
     pub wind_gustiness: f32,
+    pub time: f32,
 }
 
 impl MaterialExtension for FoliageExtension {
@@ -42,6 +43,14 @@ impl MaterialExtension for FoliageExtension {
     }
 
     fn deferred_vertex_shader() -> ShaderRef {
+        "shaders/foliage.wgsl".into()
+    }
+
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/foliage.wgsl".into()
+    }
+
+    fn deferred_fragment_shader() -> ShaderRef {
         "shaders/foliage.wgsl".into()
     }
 }
@@ -69,10 +78,11 @@ fn apply_foliage_materials(
                     base: new_mat,
                     extension: FoliageExtension {
                         data: FoliageData {
-                            wind_speed: 0.6,
+                            wind_speed: 0.75,
                             wind_amplitude: 0.15,
                             wind_flutter: 0.2,
                             wind_gustiness: 0.5,
+                            time: 0.0,
                         },
                     },
                 };
@@ -85,5 +95,12 @@ fn apply_foliage_materials(
                     .insert(MeshMaterial3d(foliage_materials.add(foliage_mat)));
             }
         }
+    }
+}
+
+fn update_foliage_time(time: Res<Time>, mut materials: ResMut<Assets<FoliageMaterial>>) {
+    let t = time.elapsed_secs();
+    for (_, mat) in materials.iter_mut() {
+        mat.extension.data.time = t;
     }
 }
