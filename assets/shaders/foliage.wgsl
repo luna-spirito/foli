@@ -10,7 +10,7 @@
 #import bevy_pbr::mesh_view_bindings::globals
 
 #ifdef PREPASS_PIPELINE
-#import bevy_pbr::prepass_io::{Vertex, VertexOutput, FragmentOutput}
+#import bevy_pbr::prepass_io::{Vertex, VertexOutput}
 #import bevy_pbr::pbr_prepass_functions::prepass_alpha_discard
 #else
 #import bevy_pbr::forward_io::{Vertex, VertexOutput, FragmentOutput}
@@ -21,23 +21,49 @@
 struct FoliageData {
     wind_speed: f32,
     wind_amplitude: f32,
+    wind_flutter: f32,
+    wind_gustiness: f32,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var<uniform> foliage_data: FoliageData;
 
-fn wind_displacement(world_pos: vec3<f32>, time: f32) -> vec3<f32> {
-    let wind_dir = vec3<f32>(1.0, 0.0, 0.3);
+fn hash13(p: vec3<f32>) -> f32 {
+    var p3 = fract(p * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
 
-    let phase = dot(world_pos.xz, vec2<f32>(0.5, 0.3));
-
-    let primary_wave = sin(time * foliage_data.wind_speed + phase);
-    let secondary_wave = sin(time * foliage_data.wind_speed * 2.3 + phase * 1.7) * 0.3;
-    let tertiary_wave = sin(time * foliage_data.wind_speed * 0.7 + phase * 1.7) * 0.5;
-
-    let combined = (primary_wave + secondary_wave + tertiary_wave) * foliage_data.wind_amplitude;
-
-    return normalize(wind_dir) * combined;
+fn wind_displacement(world_pos: vec3<f32>, local_pos: vec3<f32>, time: f32) -> vec3<f32> {
+    let speed = foliage_data.wind_speed;
+    let amp = foliage_data.wind_amplitude;
+    
+    // 1. Large scale gustiness (global movement)
+    let gust_noise = sin(time * speed * 0.2 + world_pos.x * 0.05 + world_pos.z * 0.03);
+    let gust_strength = 1.0 + foliage_data.wind_gustiness * gust_noise;
+    
+    // 2. Trunk/Main branch sway (low frequency)
+    let main_phase = dot(world_pos.xz, vec2<f32>(0.2, 0.15));
+    let main_sway = sin(time * speed + main_phase) * amp * gust_strength;
+    
+    // 3. Cluster/Branch movement (medium frequency)
+    // We use a combination of world and local pos to create "branch" groups
+    let branch_seed = floor(world_pos * 2.0); // Create virtual clusters
+    let branch_phase = hash13(branch_seed) * 6.28;
+    let branch_sway = sin(time * speed * 1.7 + branch_phase) * amp * 0.4 * gust_strength;
+    
+    // 4. Individual leaf flutter (high frequency)
+    // Small scale noise based on local position
+    let leaf_noise = sin(time * speed * 4.5 + dot(local_pos, vec3<f32>(10.0, 12.0, 11.0)));
+    let leaf_flutter = leaf_noise * foliage_data.wind_flutter * amp * gust_strength;
+    
+    // Combine directions
+    let wind_dir = normalize(vec3<f32>(1.0, 0.1, 0.3));
+    let side_dir = normalize(vec3<f32>(-0.3, 0.0, 1.0)); // Perpendicular-ish for some variety
+    
+    let total_displacement = (main_sway + branch_sway) * wind_dir + (leaf_flutter * side_dir);
+    
+    return total_displacement;
 }
 
 @vertex
@@ -60,11 +86,20 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     );
 
     // Wind displacement based on height
+    // Use a non-linear height factor for more natural bending
     let local_y = vertex.position.y;
-    let height_factor = saturate(local_y * 2.0);
-    let displacement = wind_displacement(world_position.xyz, globals.time) * height_factor;
+    let height_factor = pow(saturate(local_y), 1.5);
+    let displacement = wind_displacement(world_position.xyz, vertex.position, globals.time) * height_factor;
 
-    world_position = vec4<f32>(world_position.xyz + displacement, 1.0);
+    // Add a slight dip when swaying (simulating branch bending)
+    let dip = length(displacement.xz) * 0.4 * height_factor;
+    
+    world_position = vec4<f32>(
+        world_position.x + displacement.x,
+        world_position.y + displacement.y - dip,
+        world_position.z + displacement.z,
+        1.0
+    );
 
     out.position = position_world_to_clip(world_position.xyz);
 

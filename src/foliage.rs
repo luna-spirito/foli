@@ -24,6 +24,8 @@ pub struct FoliageExtension {
 pub struct FoliageData {
     pub wind_speed: f32,
     pub wind_amplitude: f32,
+    pub wind_flutter: f32,
+    pub wind_gustiness: f32,
 }
 
 impl MaterialExtension for FoliageExtension {
@@ -32,6 +34,14 @@ impl MaterialExtension for FoliageExtension {
     }
 
     fn fragment_shader() -> ShaderRef {
+        "shaders/foliage.wgsl".into()
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/foliage.wgsl".into()
+    }
+
+    fn deferred_vertex_shader() -> ShaderRef {
         "shaders/foliage.wgsl".into()
     }
 }
@@ -59,8 +69,10 @@ fn apply_foliage_materials(
                     base: new_mat,
                     extension: FoliageExtension {
                         data: FoliageData {
-                            wind_speed: 1.5,
-                            wind_amplitude: 0.1,
+                            wind_speed: 0.6,
+                            wind_amplitude: 0.15,
+                            wind_flutter: 0.2,
+                            wind_gustiness: 0.5,
                         },
                     },
                 };
