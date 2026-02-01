@@ -50,7 +50,7 @@ fn apply_foliage_materials(
                 let mut new_mat = std_mat.clone();
                 new_mat.cull_mode = None;
                 new_mat.double_sided = true; // Essential for flat planes
-                new_mat.alpha_mode = AlphaMode::Blend;
+                new_mat.alpha_mode = AlphaMode::Mask(0.5);
 
                 // Light transmission makes foliage look "alive" when lit from behind
                 new_mat.diffuse_transmission = 0.3;
