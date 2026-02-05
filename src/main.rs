@@ -1,10 +1,11 @@
-mod foliage;
 mod movement;
+mod render;
 
 use std::f32;
 
 use crate::movement::{BipedalCfg, apply_ik, debug_show_axis, locomotion, setup_bipedal};
 use bevy::{
+    core_pipeline::prepass::{DepthPrepass, NormalPrepass},
     gltf::{GltfPlugin, convert_coordinates::GltfConvertCoordinates},
     prelude::*,
 };
@@ -18,7 +19,8 @@ fn main() {
             },
             ..default()
         }))
-        .add_plugins(foliage::FoliagePlugin)
+        .add_plugins(render::foliage::FoliagePlugin)
+        .add_plugins(render::projector::ProjectorPlugin)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -36,13 +38,15 @@ fn main() {
 fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut _meshes: ResMut<Assets<Mesh>>,
+    mut _materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // Camera
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(7.0, 5.0, 9.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
+        DepthPrepass,
+        NormalPrepass,
     ));
 
     // Light
@@ -52,17 +56,6 @@ fn setup(
             ..default()
         },
         Transform::from_xyz(-2.0, 5.0, 3.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-
-    // Ground
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(20.0, 20.0))),
-        MeshMaterial3d(materials.add(StandardMaterial {
-            base_color: Color::srgb(0.3, 0.3, 0.3),
-            perceptual_roughness: 0.9,
-            ..default()
-        })),
-        Transform::from_xyz(0.0, 0.0, 0.0),
     ));
 
     // Model
