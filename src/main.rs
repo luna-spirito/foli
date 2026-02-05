@@ -74,8 +74,8 @@ fn setup(
             step_duration: 0.25,
             step_height: 0.2,
             ankle_height: 0.07, //0.05,
-            torso_off_min: -0.1,
-            torso_off_sway: 0.05,
+                                // torso_off_min: -0.1,
+                                // torso_off_sway: 0.05,
         },
         Player, // Mark as player controlled
     ));

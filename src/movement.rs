@@ -23,8 +23,8 @@ pub struct BipedalCfg {
     pub step_duration: f32,
     pub step_height: f32,
     pub ankle_height: f32,
-    pub torso_off_min: f32,
-    pub torso_off_sway: f32,
+    // pub torso_off_min: f32,
+    // pub torso_off_sway: f32,
 }
 
 #[derive(Component)]
@@ -160,19 +160,10 @@ pub fn setup_bipedal(
 pub fn locomotion(
     In(target_opt): In<Option<Vec3>>,
     time: Res<Time>,
-    mut query: Query<(
-        Entity,
-        &mut Transform,
-        &BipedalCfg,
-        &mut Bipedal,
-        &GlobalTransform,
-    )>,
-    mut transforms: Query<&mut Transform, Without<Bipedal>>,
-    global_transforms: Query<&GlobalTransform>,
-    parents: Query<&ChildOf>,
+    mut query: Query<(&mut Transform, &BipedalCfg, &mut Bipedal)>,
     mut gizmos: Gizmos,
 ) {
-    for (entity, mut transform, bipedal_cfg, mut bipedal, global_transform) in &mut query {
+    for (mut transform, bipedal_cfg, mut bipedal) in &mut query {
         let dt = time.delta_secs();
 
         // 1. Move Body
