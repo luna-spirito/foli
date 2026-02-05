@@ -3,7 +3,7 @@
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     fenix = {
-      url = "github:nix-community/fenix";
+      url = "github:nix-community/fenix/monthly";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -21,7 +21,10 @@
     in {
       devShells.default = pkgs.mkShell {
         buildInputs = [
-          fenix.packages.${system}.latest.toolchain
+          (with fenix.packages.${system}; combine [
+            latest.toolchain
+            latest.rustc-codegen-cranelift-preview
+          ])
           pkgs.dioxus-cli
           pkgs.pkg-config
           pkgs.mold

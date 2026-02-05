@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 bevy = { version = "0.18.0", features = [ "file_watcher" ] }
+bevy_dylib = "0.18.0"
