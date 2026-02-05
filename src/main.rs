@@ -81,7 +81,7 @@ fn setup(
     ));
 
     commands.spawn((
-        SceneRoot(asset_server.load("models/tree-test.glb#Scene0")),
+        SceneRoot(asset_server.load("models/trees/1.gltf#Scene0")),
         Transform::from_xyz(0.0, 0.0, 0.0)
             .with_rotation(Quat::from_rotation_y(f32::consts::PI / 1.5)),
     ));
