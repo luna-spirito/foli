@@ -1,141 +1,25 @@
 use bevy::{
-    asset::RenderAssetUsages,
     camera::{CameraProjection, RenderTarget, visibility::RenderLayers},
-    core_pipeline::{
-        core_3d::graph::{Core3d, Node3d},
-        prepass::DepthPrepass,
-    },
-    ecs::{query::QueryItem, system::lifetimeless::Read},
-    image::{ImageCompareFunction, ImageSampler, ImageSamplerDescriptor},
+    core_pipeline::prepass::DepthPrepass,
     light::NotShadowCaster,
     prelude::*,
-    render::{
-        RenderApp,
-        camera::ExtractedCamera,
-        extract_resource::{ExtractResource, ExtractResourcePlugin},
-        render_asset::RenderAssets,
-        render_graph::{
-            NodeRunError, RenderGraph, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode,
-            ViewNodeRunner,
-        },
-        render_resource::{
-            AsBindGroup, CommandEncoderDescriptor, Extent3d, Origin3d, ShaderType,
-            TexelCopyTextureInfo, TextureAspect, TextureDescriptor, TextureDimension,
-            TextureFormat, TextureUsages,
-        },
-        renderer::RenderContext,
-        texture::GpuImage,
-        view::ViewDepthTexture,
+    render::render_resource::{
+        AsBindGroup, Extent3d, ShaderType, TextureDescriptor, TextureDimension, TextureFormat,
+        TextureUsages,
     },
     shader::ShaderRef,
 };
 
+use crate::render::foli_view::{self, FoliViewCameraTag, FoliViewMap};
+
 /// The render layer for holographic objects
 pub const HOLOGRAM_LAYER: RenderLayers = RenderLayers::layer(10);
-pub const SHADOW_MAP_SIZE: u32 = 1024;
-
-/// Resource to hold the shadow map texture handle
-#[derive(Resource, Clone, ExtractResource)]
-pub struct ProjectorShadowMap(pub Handle<Image>);
-
-impl FromWorld for ProjectorShadowMap {
-    fn from_world(world: &mut World) -> Self {
-        let mut images = world.resource_mut::<Assets<Image>>();
-        let size = Extent3d {
-            width: SHADOW_MAP_SIZE,
-            height: SHADOW_MAP_SIZE,
-            depth_or_array_layers: 1,
-        };
-
-        // Create GPU-only depth texture (NO initial data - depth formats forbid write_texture)
-        let mut image = Image {
-            data: None, // No CPU-side data - depth textures are GPU-only
-            texture_descriptor: TextureDescriptor {
-                label: Some("Projector Shadow Map"),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: TextureDimension::D2,
-                format: TextureFormat::Depth32Float,
-                usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-            sampler: ImageSampler::Descriptor(ImageSamplerDescriptor {
-                label: Some("Projector Shadow Map Sampler".into()),
-                // GreaterEqual for reversed-Z: fragment is lit if its depth >= stored shadow depth
-                compare: Some(ImageCompareFunction::GreaterEqual),
-                ..default()
-            }),
-            asset_usage: RenderAssetUsages::RENDER_WORLD,
-            ..default()
-        };
-
-        ProjectorShadowMap(images.add(image))
-    }
-}
-
-/// Render Graph Label for the shadow copy pass
-#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct CopyShadowMapPass;
-
-/// The Render Graph Node that copies the depth texture
-#[derive(Default)]
-struct CopyShadowMapNode;
-
-impl ViewNode for CopyShadowMapNode {
-    type ViewQuery = (Read<ExtractedCamera>, Read<ViewDepthTexture>);
-
-    fn run<'w>(
-        &self,
-        _graph: &mut RenderGraphContext,
-        render_context: &mut RenderContext<'w>,
-        (camera, depth_texture): QueryItem<'w, '_, Self::ViewQuery>,
-        world: &'w World,
-    ) -> Result<(), NodeRunError> {
-        // Only run for the Shadow Camera (identified by order or tag)
-        // Here we rely on order -1 as per our setup
-        if camera.order >= 0 {
-            return Ok(());
-        }
-
-        let shadow_map_res = world.resource::<ProjectorShadowMap>();
-        let gpu_images = world.resource::<RenderAssets<GpuImage>>();
-
-        if let Some(gpu_image) = gpu_images.get(&shadow_map_res.0) {
-            let mut encoder = render_context.command_encoder();
-
-            encoder.copy_texture_to_texture(
-                TexelCopyTextureInfo {
-                    texture: &depth_texture.texture,
-                    mip_level: 0,
-                    origin: Origin3d::default(),
-                    aspect: TextureAspect::DepthOnly,
-                },
-                TexelCopyTextureInfo {
-                    texture: &gpu_image.texture,
-                    mip_level: 0,
-                    origin: Origin3d::default(),
-                    aspect: TextureAspect::DepthOnly,
-                },
-                Extent3d {
-                    width: SHADOW_MAP_SIZE,
-                    height: SHADOW_MAP_SIZE,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
-
-        Ok(())
-    }
-}
 
 pub struct ProjectorPlugin;
 
 impl Plugin for ProjectorPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(MaterialPlugin::<ProjectorDecalMaterial>::default())
-            .add_plugins(ExtractResourcePlugin::<ProjectorShadowMap>::default())
-            .init_resource::<ProjectorShadowMap>()
             .add_systems(Startup, setup_projector_infrastructure)
             .add_systems(
                 Update,
@@ -146,23 +30,6 @@ impl Plugin for ProjectorPlugin {
                     attach_projector_to_player,
                 ),
             );
-
-        // Render Graph Setup
-        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app.add_render_graph_node::<ViewNodeRunner<CopyShadowMapNode>>(
-                Core3d,
-                CopyShadowMapPass,
-            );
-
-            render_app.add_render_graph_edges(
-                Core3d,
-                (
-                    Node3d::EndPrepasses,
-                    CopyShadowMapPass,
-                    Node3d::MainOpaquePass,
-                ),
-            );
-        }
     }
 }
 
@@ -198,7 +65,6 @@ impl Material for ProjectorDecalMaterial {
 #[derive(Component)]
 pub struct ARProjector {
     pub intensity: f32,
-    pub target_image: Handle<Image>,
 }
 
 #[derive(Component)]
@@ -211,9 +77,6 @@ struct ProjectorCameraTag;
 struct DecalVolumeTag;
 
 #[derive(Component)]
-pub struct ProjectorShadowCameraTag;
-
-#[derive(Component)]
 struct AttachedToHead;
 
 fn setup_projector_infrastructure(
@@ -222,7 +85,7 @@ fn setup_projector_infrastructure(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut decal_materials: ResMut<Assets<ProjectorDecalMaterial>>,
-    projector_shadow_map: Res<ProjectorShadowMap>,
+    projector_shadow_map: Res<FoliViewMap>,
 ) {
     // 1. Create the RTT texture
     let size = Extent3d {
@@ -262,12 +125,10 @@ fn setup_projector_infrastructure(
             ..default()
         },
         RenderTarget::Image(image_handle.clone().into()),
+        Msaa::Off,
         Transform::default(),
         HOLOGRAM_LAYER,
-        ARProjector {
-            intensity: 10.0,
-            target_image: image_handle.clone(),
-        },
+        ARProjector { intensity: 10.0 },
         ProjectorCameraTag,
     ));
 
@@ -286,14 +147,14 @@ fn setup_projector_infrastructure(
         },
         // No RenderTarget (Manual size for Depth Texture)
         RenderTarget::None {
-            size: UVec2::splat(SHADOW_MAP_SIZE),
+            size: UVec2::splat(foli_view::SHADOW_MAP_SIZE),
         },
         Msaa::Off,
         DepthPrepass,
         Transform::default(),
         // Shadow camera sees World (0) but NOT Holograms (10)
         RenderLayers::default().with(0).without(10),
-        ProjectorShadowCameraTag,
+        foli_view::FoliViewCameraTag,
     ));
 
     // 4. Create the Projector Material
@@ -387,7 +248,7 @@ fn attach_projector_to_player(
         (Without<AttachedToHead>, Without<ProjectorCameraTag>),
     >,
     projector_camera_query: Query<Entity, With<ProjectorCameraTag>>,
-    shadow_camera_query: Query<Entity, With<ProjectorShadowCameraTag>>,
+    shadow_camera_query: Query<Entity, With<FoliViewCameraTag>>,
     decal_volume_query: Query<Entity, With<DecalVolumeTag>>,
 ) {
     let Some(projector_cam) = projector_camera_query.iter().next() else {

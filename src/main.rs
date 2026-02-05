@@ -21,6 +21,7 @@ fn main() {
         }))
         .add_plugins(render::foliage::FoliagePlugin)
         .add_plugins(render::projector::ProjectorPlugin)
+        .add_plugins(render::foli_view::FoliViewPlugin)
         .add_systems(Startup, setup)
         .add_systems(
             Update,
