@@ -2,9 +2,12 @@ use bevy::{
     camera::{CameraProjection, RenderTarget, visibility::RenderLayers},
     core_pipeline::prepass::DepthPrepass,
     light::NotShadowCaster,
+    mesh::MeshVertexBufferLayoutRef,
+    pbr::{Material, MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::render_resource::{
-        AsBindGroup, Extent3d, ShaderType, TextureDescriptor, TextureDimension, TextureFormat,
+        AsBindGroup, CompareFunction, Extent3d, Face, RenderPipelineDescriptor, ShaderType,
+        SpecializedMeshPipelineError, TextureDescriptor, TextureDimension, TextureFormat,
         TextureUsages,
     },
     shader::ShaderRef,
@@ -59,6 +62,22 @@ impl Material for ProjectorDecalMaterial {
 
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Blend
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        descriptor.primitive.cull_mode = Some(Face::Front);
+        // Disable depth testing.
+        // Since we're only showing back faces, they are easily beyond the scene boundary. So we disable depth testing.
+        if let Some(depth_stencil) = &mut descriptor.depth_stencil {
+            depth_stencil.depth_compare = CompareFunction::Always;
+            depth_stencil.depth_write_enabled = false;
+        }
+        Ok(())
     }
 }
 
